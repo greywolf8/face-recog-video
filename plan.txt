@@ -1,0 +1,152 @@
+Windsurf Fix Prompt — CRITICAL FaceMesh Heatmap Jitter & Random Fluctuation (MediaPipe Region Heatmap Pipeline)
+
+Project Context:
+This project was previously implemented by Windsurf using MediaPipe FaceMesh for facial landmark tracking and a region-based heatmap system that highlights facial activity. After recent updates (region aggregation + facemap integration), the heatmap has become highly unstable and fluctuates randomly even when the face is completely still. Tiny landmark jitter is being falsely interpreted as motion, causing continuous heatmap remapping.
+
+You must audit and FIX the existing implementation (not rebuild from scratch) while preserving the current architecture and UI.
+
+PRIMARY SYMPTOMS (CONFIRMED):
+- Heatmap randomly moves across regions on a still face
+- Fluctuation increases after region-based aggregation
+- Micro landmark jitter (~1–3 px) is treated as real motion
+- Heatmap updates every frame unnecessarily
+- Some input fields blur/disable despite valid positive values
+- Missing calculations and unknown warnings with valid inputs
+- Graphs occasionally go blank for valid parameter ranges
+
+ROOT CAUSE (ENGINEERING):
+MediaPipe FaceMesh landmarks naturally jitter every frame due to subpixel estimation, camera noise, and floating-point updates. The current pipeline lacks jitter filtering, temporal smoothing, baseline referencing, and idle suppression. Region aggregation is amplifying noise instead of stabilizing it.
+
+MANDATORY IMPLEMENTATION FIXES (DO IN ORDER):
+
+STEP 1 — Landmark Smoothing Layer (CRITICAL)
+Before ANY region activity calculation, apply smoothing to all 468 landmarks.
+Implement Exponential Moving Average (EMA):
+
+smoothed_landmark = alpha * prev_smoothed + (1 - alpha) * current_raw
+
+Recommended:
+alpha = 0.88 (configurable)
+
+Store:
+- raw_landmarks
+- smoothed_landmarks (used for ALL downstream calculations)
+
+DO NOT compute displacement using raw landmarks anymore.
+
+STEP 2 — Motion Noise Threshold (Jitter Suppression)
+Introduce a minimum displacement threshold to ignore micro jitter.
+
+For each landmark:
+dx = abs(x_t - x_baseline)
+dy = abs(y_t - y_baseline)
+displacement = sqrt(dx² + dy²)
+
+If displacement < NOISE_THRESHOLD:
+    displacement = 0
+
+Recommended:
+NOISE_THRESHOLD = 1.5 to 2.5 pixels (or normalized equivalent)
+
+This alone should eliminate random heatmap activation during still face.
+
+STEP 3 — Stable Baseline Reference System
+Current bug: frame-to-frame comparison amplifies noise.
+
+Fix:
+- Maintain a rolling baseline of smoothed landmarks
+- Update baseline ONLY when significant motion is detected
+- If idle, keep baseline static
+
+Pseudo:
+if global_activity > BASELINE_UPDATE_THRESHOLD:
+    baseline = smoothed_landmarks
+
+Do NOT constantly overwrite baseline every frame.
+
+STEP 4 — Region Activity Calculation (Noise-Safe)
+Modify region aggregation logic:
+- Use MEDIAN displacement (NOT mean)
+- Normalize by number of landmarks in region
+- Clamp tiny values to zero
+
+Correct formula:
+region_activity = median(valid_displacements) / region_landmark_count
+
+This prevents noise amplification from jittering points.
+
+STEP 5 — Idle Freeze Logic (VERY IMPORTANT)
+Add global activity gating:
+
+global_activity = sum(region_activity)
+
+If global_activity < IDLE_THRESHOLD:
+    DO NOT regenerate heatmap
+    Apply decay instead:
+        heatmap = previous_heatmap * 0.96
+
+This will stop random remapping when the face is still.
+
+STEP 6 — Temporal Heatmap Smoothing
+Apply EMA to the heatmap matrix itself:
+
+heatmap_t = beta * heatmap_t-1 + (1 - beta) * current_heatmap
+
+Recommended:
+beta = 0.90
+
+This ensures smooth transitions instead of frame-wise flickering.
+
+STEP 7 — Rendering Stability Audit
+Verify and FIX the visualization engine:
+- Ensure heatmap array is NOT reinitialized each frame
+- Disable any random seed usage in colormap generation
+- Fix dynamic color scale resets (use fixed min/max normalization)
+- Prevent rendering from uninitialized or NaN arrays
+- Ensure blank graphs are not caused by empty datasets after filtering
+
+STEP 8 — Input Validation & UI Bug Fix (Blur/Disabled Fields)
+Investigate why valid positive inputs (Diameter Range, Bend Angle Range, Turns Range) become blurred/disabled.
+
+Fix requirements:
+- Remove over-restrictive validation conditions
+- Allow full positive numeric ranges
+- Do not disable fields unless values are truly invalid
+- Ensure calculations trigger after valid input changes
+- Remove “unknown warnings” when inputs are positive and within bounds
+
+STEP 9 — Graph Blank Issue (Parameter Range Bug)
+When ranges increase and graphs go blank:
+- Check for division by zero
+- Check NaN/Infinity propagation
+- Add safe clamps:
+  if isNaN(value) or isInf(value): value = 0
+- Ensure plotting arrays always contain valid numeric values
+
+STEP 10 — Debug Diagnostics (MANDATORY LOGGING)
+Add console/debug logs for:
+- Raw vs smoothed landmark displacement
+- Per-region activity score
+- Global activity score
+- Idle freeze trigger status
+- Baseline update trigger
+- Heatmap regeneration condition
+- NaN detection in calculations
+
+EXPECTED FINAL BEHAVIOR (ACCEPTANCE CRITERIA):
+- Completely still face → Stable heatmap (no random movement)
+- Micro jitter → Ignored entirely
+- Real facial movement → Smooth localized heatmap response
+- No sudden random region jumps
+- No blank graphs for valid ranges
+- No blurred inputs for valid positive values
+- No unexplained warnings during normal operation
+
+IMPORTANT CONSTRAINT:
+This system was originally built by Windsurf. You must:
+- Refactor the existing pipeline
+- Preserve architecture and existing modules
+- Avoid rewriting unrelated components
+- Check README and current calculation modules before modifying logic
+
+Perform a full pipeline audit if any assumptions about data flow are unclear before implementing fixes.

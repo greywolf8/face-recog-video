@@ -1,0 +1,337 @@
+"""
+Heatmap Generation Module
+Generates dynamic Gaussian heatmaps based on facial landmark positions, movement velocity, and density
+"""
+
+import numpy as np
+import cv2
+from scipy.ndimage import gaussian_filter
+from typing import Tuple, Optional
+from collections import deque
+
+class HeatmapGenerator:
+    """Generates real-time heatmaps based on facial landmark activity"""
+    
+    def __init__(self, width: int = 640, height: int = 480, sigma: float = 15.0, 
+                 temporal_smoothing: float = 0.3):
+        """
+        Initialize heatmap generator
+        
+        Args:
+            width: Heatmap width
+            height: Heatmap height
+            sigma: Gaussian kernel standard deviation
+            temporal_smoothing: EMA smoothing factor for heatmap (0-1)
+        """
+        self.width = width
+        self.height = height
+        self.sigma = sigma
+        self.temporal_smoothing = temporal_smoothing
+        
+        # Create coordinate grids
+        self.x_grid, self.y_grid = np.meshgrid(
+            np.arange(width), np.arange(height)
+        )
+        
+        # Persistent heatmap for temporal smoothing (Step 6 fix)
+        self.persistent_heatmap = None
+        self.heatmap_smoothing_beta = 0.90  # Enhanced temporal smoothing (90% smooth + 10% new)
+        
+        # Previous landmarks for movement calculation
+        self.prev_landmarks = None
+        
+        # Color mapping for visualization (blue -> yellow -> red)
+        self.colormap = cv2.COLORMAP_JET
+        
+        # Performance optimization parameters
+        self.landmark_step = 3  # Process every 3rd landmark for performance
+        self.grid_size_factor = 3  # Grid size multiplier for local processing
+    
+    def generate_heatmap(self, landmarks: np.ndarray, movement_weights: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Generate a Gaussian heatmap based on landmark positions and movement
+        
+        Args:
+            landmarks: numpy array of shape (468, 2) containing (x, y) coordinates
+            movement_weights: optional array of movement weights for each landmark
+            
+        Returns:
+            Heatmap as numpy array of shape (height, width) with values 0-255
+        """
+        # Initialize empty heatmap
+        heatmap = np.zeros((self.height, self.width), dtype=np.float32)
+        
+        if landmarks is None or len(landmarks) == 0:
+            return self._apply_temporal_smoothing(heatmap)
+        
+        # Calculate movement weights if not provided
+        if movement_weights is None:
+            if self.prev_landmarks is not None and len(self.prev_landmarks) == len(landmarks):
+                # Calculate movement magnitude for each landmark
+                movement = np.linalg.norm(landmarks - self.prev_landmarks, axis=1)
+                # Normalize movement weights to 0-1 range
+                movement_weights = movement / (np.max(movement) + 1e-6)
+            else:
+                movement_weights = np.ones(len(landmarks))
+        
+        # Create Gaussian kernels for each landmark (sample landmarks for performance)
+        # Process every 3rd landmark to improve performance
+        step = self.landmark_step
+        for i in range(0, len(landmarks), step):
+            x, y = landmarks[i]
+            if 0 <= x < self.width and 0 <= y < self.height:
+                # Create smaller coordinate grids for performance
+                grid_size = int(self.sigma * self.grid_size_factor)
+                y_min = max(0, int(y - grid_size))
+                y_max = min(self.height, int(y + grid_size + 1))
+                x_min = max(0, int(x - grid_size))
+                x_max = min(self.width, int(x + grid_size + 1))
+                
+                # Create local grid instead of full image grid
+                y_grid, x_grid = np.ogrid[y_min:y_max, x_min:x_max]
+                
+                # Calculate distance from landmark
+                dist_sq = (x_grid - x) ** 2 + (y_grid - y) ** 2
+                
+                # Apply Gaussian function with movement weight
+                weight = movement_weights[i] if i < len(movement_weights) else 1.0
+                gaussian = np.exp(-dist_sq / (2 * self.sigma ** 2)) * weight
+                
+                # Add to heatmap (local region)
+                heatmap[y_min:y_max, x_min:x_max] += gaussian
+        
+        # Apply lighter Gaussian smoothing for performance
+        if self.sigma > 5:
+            heatmap = gaussian_filter(heatmap, sigma=self.sigma / 4)
+        
+        # Store current landmarks for next frame
+        self.prev_landmarks = landmarks.copy()
+        
+        # Apply temporal smoothing with persistent memory (Phase 1 fix)
+        return self._apply_temporal_smoothing(heatmap)
+    
+    def _apply_temporal_smoothing(self, current_heatmap: np.ndarray) -> np.ndarray:
+        """Apply enhanced EMA temporal smoothing (Step 6 fix)"""
+        # Initialize persistent heatmap on first frame
+        if self.persistent_heatmap is None:
+            self.persistent_heatmap = current_heatmap.copy()
+            return current_heatmap
+        
+        # Apply enhanced EMA smoothing: heatmap = 0.90 * persistent + 0.10 * new
+        # This creates strong temporal memory and smooth transitions
+        if np.max(current_heatmap) > 0:
+            self.persistent_heatmap = (
+                self.heatmap_smoothing_beta * self.persistent_heatmap + 
+                (1 - self.heatmap_smoothing_beta) * current_heatmap
+            )
+            # Debug log for heatmap smoothing (Step 10)
+            print(f"🔥 HEATMAP SMOOTHING: Applied {self.heatmap_smoothing_beta:.2f} beta factor")
+        else:
+            # Face lost - gradual decay instead of reset for smooth fade-out
+            self.persistent_heatmap *= 0.95
+            print(f"🌙 FADE OUT: Applied 0.95 decay factor")
+        
+        # Apply Gaussian blur before centroid calculation for stability (Phase 1 fix)
+        # Use smaller sigma for subtle smoothing that preserves detail
+        smoothed_heatmap = gaussian_filter(self.persistent_heatmap, sigma=1.0)
+        
+        return smoothed_heatmap
+    
+    def reset(self):
+        """Reset heatmap state for new tracking session"""
+        self.persistent_heatmap = np.zeros((self.height, self.width), dtype=np.float32)
+        self.prev_landmarks = None
+    
+    def normalize_heatmap(self, heatmap: np.ndarray) -> np.ndarray:
+        """
+        Normalize heatmap to 0-255 range with stability fixes (Step 7 fix)
+        
+        Args:
+            heatmap: Input heatmap
+            
+        Returns:
+            Normalized heatmap as uint8 array
+        """
+        # Step 7 fix: Handle NaN/Infinity values
+        if heatmap is None or heatmap.size == 0:
+            return np.zeros((self.height, self.width), dtype=np.uint8)
+        
+        # Replace NaN and Infinity with zeros
+        heatmap = np.nan_to_num(heatmap, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Check for valid values
+        max_val = np.max(heatmap)
+        if max_val > 0 and not np.isnan(max_val) and not np.isinf(max_val):
+            # Use fixed min/max normalization to prevent dynamic scale resets
+            # This prevents sudden color changes that cause flickering
+            min_val = np.min(heatmap[heatmap > 0]) if np.any(heatmap > 0) else 0.0
+            
+            # Clamp extreme values to prevent instability
+            max_val = min(max_val, 10.0)  # Prevent extreme spikes
+            
+            normalized = ((heatmap - min_val) / (max_val - min_val + 1e-6) * 255).astype(np.uint8)
+        else:
+            # Return empty heatmap for invalid data
+            normalized = np.zeros_like(heatmap, dtype=np.uint8)
+        
+        return normalized
+    
+    def apply_colormap(self, heatmap: np.ndarray) -> np.ndarray:
+        """
+        Apply color colormap to heatmap
+        
+        Args:
+            heatmap: Normalized heatmap (0-255)
+            
+        Returns:
+            Color heatmap as BGR array
+        """
+        return cv2.applyColorMap(heatmap, self.colormap)
+    
+    def overlay_heatmap(self, frame: np.ndarray, heatmap: np.ndarray, alpha: float = 0.6) -> np.ndarray:
+        """
+        Overlay heatmap on original frame with stability fixes (Step 7 fix)
+        
+        Args:
+            frame: Original BGR frame
+            heatmap: Color heatmap (BGR)
+            alpha: Transparency factor (0-1)
+            
+        Returns:
+            Frame with heatmap overlay
+        """
+        # Step 7 fix: Validate inputs
+        if frame is None or frame.size == 0:
+            return np.zeros((480, 640, 3), dtype=np.uint8)  # Default fallback
+        
+        if heatmap is None or heatmap.size == 0:
+            return frame.copy()  # Return original frame if no heatmap
+        
+        # Ensure heatmap is same size as frame
+        if heatmap.shape[:2] != frame.shape[:2]:
+            heatmap = cv2.resize(heatmap, (frame.shape[1], frame.shape[0]))
+        
+        # Step 7 fix: Clamp alpha to valid range
+        alpha = max(0.0, min(1.0, alpha))
+        
+        # Blend frames with error handling
+        try:
+            overlay = cv2.addWeighted(frame, 1 - alpha, heatmap, alpha, 0)
+        except cv2.error:
+            # Fallback: just return the frame if blending fails
+            overlay = frame.copy()
+        
+        return overlay
+    
+    def calculate_heatmap_stats(self, heatmap: np.ndarray) -> dict:
+        """
+        Calculate statistics about the heatmap
+        
+        Args:
+            heatmap: Heatmap array
+            
+        Returns:
+            Dictionary containing heatmap statistics
+        """
+        if np.max(heatmap) == 0:
+            return {
+                'max_intensity': 0.0,
+                'mean_intensity': 0.0,
+                'centroid_x': 0,
+                'centroid_y': 0,
+                'active_area_ratio': 0.0
+            }
+        
+        # Find centroid of heatmap with improved threshold and stability (Phase 1 fix)
+        max_intensity = np.max(heatmap)
+        if max_intensity == 0:
+            return {
+                'max_intensity': 0.0,
+                'mean_intensity': 0.0,
+                'centroid_x': 0,
+                'centroid_y': 0,
+                'active_area_ratio': 0.0
+            }
+        
+        # Use higher threshold for more stable centroid calculation
+        # This reduces noise and provides more consistent center-of-heat tracking
+        threshold_ratio = 0.2  # Increased from 0.1 to 0.2 for better stability
+        y_coords, x_coords = np.where(heatmap > max_intensity * threshold_ratio)
+        
+        if len(x_coords) > 0 and len(y_coords) > 0:
+            # Calculate weighted centroid for better accuracy
+            weights = heatmap[y_coords, x_coords]
+            if np.sum(weights) > 0:
+                centroid_x = int(np.average(x_coords, weights=weights))
+                centroid_y = int(np.average(y_coords, weights=weights))
+            else:
+                centroid_x = int(np.mean(x_coords))
+                centroid_y = int(np.mean(y_coords))
+        else:
+            centroid_x, centroid_y = 0, 0
+        
+        # Calculate active area (pixels above threshold)
+        threshold = np.max(heatmap) * 0.05
+        active_pixels = np.sum(heatmap > threshold)
+        total_pixels = heatmap.shape[0] * heatmap.shape[1]
+        active_area_ratio = active_pixels / total_pixels
+        
+        stats = {
+            'max_intensity': float(max_intensity),
+            'mean_intensity': float(np.mean(heatmap)),
+            'centroid_x': centroid_x,
+            'centroid_y': centroid_y,
+            'active_area_ratio': active_area_ratio
+        }
+        
+        return stats
+    
+    def create_density_heatmap(self, landmarks: np.ndarray, kernel_size: int = 50) -> np.ndarray:
+        """
+        Create a density-based heatmap showing landmark clustering
+        
+        Args:
+            landmarks: Landmark coordinates
+            kernel_size: Size of the density kernel
+            
+        Returns:
+            Density heatmap
+        """
+        density_map = np.zeros((self.height, self.width), dtype=np.float32)
+        
+        if landmarks is None or len(landmarks) == 0:
+            return density_map
+        
+        # Convert landmarks to integer coordinates
+        int_landmarks = landmarks.astype(int)
+        
+        # Add each landmark to density map with Gaussian kernel
+        for x, y in int_landmarks:
+            if 0 <= x < self.width and 0 <= y < self.height:
+                # Define kernel bounds
+                y_min = max(0, y - kernel_size // 2)
+                y_max = min(self.height, y + kernel_size // 2 + 1)
+                x_min = max(0, x - kernel_size // 2)
+                x_max = min(self.width, x + kernel_size // 2 + 1)
+                
+                # Create small Gaussian kernel
+                kernel_y, kernel_x = np.ogrid[y_min:y_max, x_min:x_max]
+                dist_sq = (kernel_x - x) ** 2 + (kernel_y - y) ** 2
+                kernel = np.exp(-dist_sq / (2 * (kernel_size / 4) ** 2))
+                
+                density_map[y_min:y_max, x_min:x_max] += kernel
+        
+        return density_map
+    
+    def reset(self):
+        """Reset the heatmap generator state"""
+        self.persistent_heatmap = np.zeros((self.height, self.width), dtype=np.float32)
+        self.prev_landmarks = None
+    
+    def update_sigma(self, new_sigma: float):
+        """Update the Gaussian sigma value"""
+        self.sigma = max(1.0, new_sigma)
+    
+    def update_temporal_smoothing(self, new_smoothing: float):
+        """Update temporal smoothing factor"""
+        self.temporal_smoothing = max(0.0, min(1.0, new_smoothing))

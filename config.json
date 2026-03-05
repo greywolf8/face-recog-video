@@ -1,0 +1,77 @@
+{
+  "heatmap": {
+    "sigma": 15.0,
+    "temporal_smoothing": 0.3,
+    "buffer_size": 5,
+    "alpha": 0.6,
+    "colormap": 11
+  },
+  "tracking": {
+    "time_windows": [5.0, 10.0, 15.0],
+    "activity_threshold": 0.01,
+    "max_faces": 1,
+    "min_detection_confidence": 0.5,
+    "min_tracking_confidence": 0.5
+  },
+  "logging": {
+    "output_file": "realtime_face_heatmap_log.csv",
+    "buffer_size": 100,
+    "auto_flush_interval": 5.0,
+    "generate_summary": true
+  },
+  "display": {
+    "window_name": "Face Heatmap Tracking",
+    "width": 1280,
+    "height": 720,
+    "show_landmarks": true,
+    "show_heatmap": true,
+    "show_regions": true,
+    "show_facemap": true,
+    "show_fps": true,
+    "show_timestamp": true
+  },
+  "facemap": {
+    "enabled": true,
+    "color": [0, 255, 0],
+    "thickness": 2,
+    "show_labels": true,
+    "font_scale": 0.15
+  },
+  "regions": {
+    "enabled_regions": [
+      "RIGHT_EYEBROW",
+      "LEFT_EYEBROW",
+      "RIGHT_EYE",
+      "LEFT_EYE",
+      "NOSE",
+      "LIPS",
+      "FOREHEAD",
+      "CHIN",
+      "RIGHT_CHEEK",
+      "LEFT_CHEEK",
+      "RIGHT_EAR",
+      "LEFT_EAR",
+      "HAIR",
+      "NECK",
+      "RIGHT_SHOULDER",
+      "LEFT_SHOULDER"
+    ],
+    "region_colors": {}
+  },
+  "performance": {
+    "target_fps": 30,
+    "max_frame_size": [1920, 1080],
+    "enable_gpu": false,
+    "processing_threads": 1
+  },
+  "camera": {
+    "default": "webcam",
+    "webcam_index": 0,
+    "realsense_resolution": [640, 480],
+    "fps": 30,
+    "fallback_to_webcam": true
+  },
+  "camera_index": 0,
+  "save_video": false,
+  "output_dir": "output"
+}
